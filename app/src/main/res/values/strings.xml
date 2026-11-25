@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Pool Lines</string>
+    <string name="acc_label">Pool Lines Auto Aim</string>
+    <string name="acc_desc">Table detect karke khud aim aur shoot karta hai.</string>
+</resources>
