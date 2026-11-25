@@ -66,8 +66,8 @@ android {
         applicationId "com.poollines.android"
         minSdk 26
         targetSdk 34
-        versionCode 4
-        versionName "3.1"
+        versionCode 5
+        versionName "4.0"
     }
 
     compileOptions {
@@ -180,11 +180,12 @@ public final class Config {
 
     public static final int CAPTURE_DIV = 2;
     public static final int TARGET_FPS = 8;
-    public static final float BALL_R_RATIO = 0.0208f;
-    public static final int STILL_MS = 900;
-    public static final long COOLDOWN_MS = 3500;
-    public static final long GESTURE_MS = 700;
-    public static final long FAIL_BACKOFF_MS = 1500;
+    public static final float BALL_R_RATIO = 0.0195f;
+    public static final int STILL_MS = 750;
+    public static final long COOLDOWN_MS = 3200;
+    public static final long AIM_MS = 380;
+    public static final long POWER_MS = 520;
+    public static final long FAIL_BACKOFF_MS = 1200;
     public static final int BRAIN_TIMEOUT_MS = 1200;
 
     private Config() {}
@@ -234,32 +235,70 @@ public final class PoolDetector {
         int[] px = new int[w * h];
         bmp.getPixels(px, 0, w, 0, 0, w, h);
 
-        int l = Math.max(0, table.left), t = Math.max(0, table.top);
-        int r = Math.min(w - 1, table.right), bo = Math.min(h - 1, table.bottom);
+        int pad = Math.max(4, Math.round(ballR * 0.65f));
+        int l = Math.max(0, table.left + pad), t = Math.max(0, table.top + pad);
+        int r = Math.min(w - 1, table.right - pad), bo = Math.min(h - 1, table.bottom - pad);
+        if (r <= l || bo <= t) return new ArrayList<>();
+
+        // Sample average felt color from 4 inner quadrants so blue/green felt never triggers ball mask
+        int feltR = 45, feltG = 140, feltB = 185;
+        long fR = 0, fG = 0, fB = 0;
+        int fCnt = 0;
+        int stepY = Math.max(4, (bo - t) / 10);
+        int stepX = Math.max(4, (r - l) / 14);
+        for (int sy = t + stepY; sy < bo - stepY; sy += stepY) {
+            for (int sx = l + stepX; sx < r - stepX; sx += stepX) {
+                int c = px[sy * w + sx];
+                int rr = (c >> 16) & 0xff, gg = (c >> 8) & 0xff, bb = c & 0xff;
+                // Blue/green felt typically has G > R + 20 and B > R + 20
+                if (gg > rr + 15 && bb > rr + 15 && rr < 110) {
+                    fR += rr; fG += gg; fB += bb; fCnt++;
+                }
+            }
+        }
+        if (fCnt > 8) {
+            feltR = (int) (fR / fCnt);
+            feltG = (int) (fG / fCnt);
+            feltB = (int) (fB / fCnt);
+        }
 
         boolean[] mask = new boolean[w * h];
-        for (int y = t; y <= bo; y += 2) {
+        for (int y = t; y <= bo; y++) {
             int row = y * w;
-            for (int x = l; x <= r; x += 2) {
+            for (int x = l; x <= r; x++) {
                 int c = px[row + x];
                 int rr = (c >> 16) & 0xff, gg = (c >> 8) & 0xff, bb = c & 0xff;
+
+                // Distance from felt color
+                int df = Math.abs(rr - feltR) + Math.abs(gg - feltG) + Math.abs(bb - feltB);
+                if (df < 68) continue;
+
                 int mn = Math.min(rr, Math.min(gg, bb));
                 int mx = Math.max(rr, Math.max(gg, bb));
-                if (mn > 200 && mx - mn < 26) mask[row + x] = true;
-                else if (mx > 85 && mx - mn > 55) mask[row + x] = true;
+
+                // White / Cue ball (including shaded cream/gray cue ball or hand icon border)
+                if (mn > 155 && mx - mn < 45) {
+                    mask[row + x] = true;
+                } else if (mx < 58 && df > 110) {
+                    // 8-ball black
+                    mask[row + x] = true;
+                } else if (mx > 85 && (mx - mn > 48 || df > 105)) {
+                    // Colored object balls
+                    mask[row + x] = true;
+                }
             }
         }
 
-        double expected = Math.PI * ballR * ballR / 4.0;
+        double expected = Math.PI * ballR * ballR;
         boolean[] seen = new boolean[w * h];
         int[] stack = new int[w * h];
         List<Ball> out = new ArrayList<>();
         int nextId = 1;
         Ball bestCue = null;
-        int bestCueScore = -1;
+        float bestCueScore = -1f;
 
-        for (int y = t; y <= bo; y += 2) {
-            for (int x = l; x <= r; x += 2) {
+        for (int y = t; y <= bo; y++) {
+            for (int x = l; x <= r; x++) {
                 int start = y * w + x;
                 if (!mask[start] || seen[start]) continue;
 
@@ -269,14 +308,19 @@ public final class PoolDetector {
 
                 long sumX = 0, sumY = 0, sumR = 0, sumG = 0, sumB = 0;
                 int n = 0, minX = x, maxX = x, minY = y, maxY = y;
+                int whitePx = 0;
 
                 while (sp > 0) {
                     int cur = stack[--sp];
                     int cy = cur / w, cx = cur - cy * w;
                     int c = px[cur];
-                    sumR += (c >> 16) & 0xff;
-                    sumG += (c >> 8) & 0xff;
-                    sumB += c & 0xff;
+                    int rr = (c >> 16) & 0xff, gg = (c >> 8) & 0xff, bb = c & 0xff;
+                    sumR += rr;
+                    sumG += gg;
+                    sumB += bb;
+                    if (rr > 175 && gg > 175 && bb > 170 && Math.max(rr, Math.max(gg, bb)) - Math.min(rr, Math.min(gg, bb)) < 38) {
+                        whitePx++;
+                    }
                     sumX += cx;
                     sumY += cy;
                     n++;
@@ -286,10 +330,10 @@ public final class PoolDetector {
                     if (cy < minY) minY = cy;
                     if (cy > maxY) maxY = cy;
 
-                    for (int dy = -2; dy <= 2; dy += 2) {
+                    for (int dy = -1; dy <= 1; dy++) {
                         int ny = cy + dy;
                         if (ny < t || ny > bo) continue;
-                        for (int dx = -2; dx <= 2; dx += 2) {
+                        for (int dx = -1; dx <= 1; dx++) {
                             int nx = cx + dx;
                             if (nx < l || nx > r) continue;
                             int ni = ny * w + nx;
@@ -301,21 +345,24 @@ public final class PoolDetector {
                     }
                 }
 
-                if (n < expected * 0.35 || n > expected * 3.2) continue;
+                // Filter out thin long aim lines or cue sticks:
                 int bw = maxX - minX + 1, bh = maxY - minY + 1;
-                if (bw < 5 || bh < 5) continue;
+                if (bw < 4 || bh < 4) continue;
                 float ar = bw / (float) bh;
-                if (ar < 0.55f || ar > 1.8f) continue;
+                // Aim line or cue stick has very extreme aspect ratio
+                if (ar < 0.35f || ar > 2.8f) continue;
+                if (n < expected * 0.22 || n > expected * 4.5) continue;
 
                 int mr = (int) (sumR / n), mg = (int) (sumG / n), mb = (int) (sumB / n);
-                int col = classify(mr, mg, mb);
+                int col = classify(mr, mg, mb, whitePx / (float) n);
                 if (col < 0) continue;
 
                 float cx2 = sumX / (float) n, cy2 = sumY / (float) n;
                 if (col == Ball.CUE) {
-                    int brightness = mr + mg + mb;
-                    if (brightness > bestCueScore) {
-                        bestCueScore = brightness;
+                    float roundness = 1f - Math.abs(1f - ar);
+                    float score = whitePx * roundness;
+                    if (score > bestCueScore) {
+                        bestCueScore = score;
                         bestCue = new Ball(0, Ball.CUE, cx2, cy2);
                     }
                 } else {
@@ -329,16 +376,15 @@ public final class PoolDetector {
         return out;
     }
 
-    private static int classify(int r, int g, int b) {
+    private static int classify(int r, int g, int b, float whiteRatio) {
         float[] hsv = new float[3];
         Color.RGBToHSV(r, g, b, hsv);
-        if (hsv[2] > 0.72f && hsv[1] < 0.22f) return Ball.CUE;
-        if (hsv[2] < 0.22f) return Ball.BLACK;
-        if (hsv[1] < 0.28f) return Ball.UNKNOWN;
+        if ((hsv[2] > 0.65f && hsv[1] < 0.28f) || whiteRatio > 0.48f) return Ball.CUE;
+        if (hsv[2] < 0.25f) return Ball.BLACK;
         float hh = hsv[0];
-        if (hh < 20 || hh >= 340) return Ball.RED;
-        if (hh < 45) return Ball.ORANGE;
-        if (hh < 70) return Ball.YELLOW;
+        if (hh < 18 || hh >= 340) return Ball.RED;
+        if (hh < 42) return Ball.ORANGE;
+        if (hh < 72) return Ball.YELLOW;
         if (hh < 165) return Ball.GREEN;
         if (hh < 260) return Ball.BLUE;
         if (hh < 320) return Ball.PURPLE;
@@ -401,7 +447,7 @@ public final class Physics {
 
             if (cueLive) {
                 for (float[] p : pockets) {
-                    if (near(c, p, r * 1.35f)) {
+                    if (near(c, p, r * 1.45f)) {
                         cueLive = false;
                         o.scratch = true;
                         break;
@@ -412,7 +458,7 @@ public final class Physics {
                 Ball b = sim.get(i);
                 boolean dropped = false;
                 for (float[] p : pockets) {
-                    if (near(b, p, r * 1.35f)) { dropped = true; break; }
+                    if (near(b, p, r * 1.45f)) { dropped = true; break; }
                 }
                 if (dropped) {
                     o.potted.add(b.id);
@@ -453,7 +499,6 @@ public final class Physics {
         if (d < 0.001f) d = 0.001f;
         float nx = dx / d, ny = dy / d;
 
-        // Positional separation to prevent multi-frame overlap lock
         float pen = (2f * r) - d;
         if (pen > 0) {
             a.x -= nx * pen * 0.5f;
@@ -487,18 +532,19 @@ import java.util.List;
 public final class Solver {
     public static class Shot {
         public float angleDeg, power, score;
+        public float gx, gy, tx, ty, px, py;
         public String why = "";
         public boolean valid;
     }
 
     public static List<float[]> pockets(Rect t, float r) {
-        float in = r * 1.4f;
+        float in = r * 1.15f;
         List<float[]> p = new ArrayList<>();
         p.add(new float[]{t.left + in, t.top + in});
-        p.add(new float[]{(t.left + t.right) / 2f, t.top + in * 0.6f});
+        p.add(new float[]{(t.left + t.right) / 2f, t.top + in * 0.45f});
         p.add(new float[]{t.right - in, t.top + in});
         p.add(new float[]{t.left + in, t.bottom - in});
-        p.add(new float[]{(t.left + t.right) / 2f, t.bottom - in * 0.6f});
+        p.add(new float[]{(t.left + t.right) / 2f, t.bottom - in * 0.45f});
         p.add(new float[]{t.right - in, t.bottom - in});
         return p;
     }
@@ -522,30 +568,37 @@ public final class Solver {
 
                 float cdx = gx - cue.x, cdy = gy - cue.y;
                 float cd = (float) Math.hypot(cdx, cdy);
-                if (cd < r * 1.2f) continue;
+                if (cd < r * 1.1f) continue;
 
                 float dot = (cdx * pdx + cdy * pdy) / cd;
                 float cut = (float) Math.toDegrees(Math.acos(Math.max(-1, Math.min(1, dot))));
-                if (cut > 75) continue;
+                if (cut > 76) continue;
 
                 if (!clear(balls, cue, target, cue.x, cue.y, gx, gy, r)) continue;
                 if (!clear(balls, cue, target, target.x, target.y, p[0], p[1], r)) continue;
 
                 float ang = (float) Math.toDegrees(Math.atan2(cdy, cdx));
-                float power = clamp(0.32f + (cd + pd) / 1400f, 0.3f, 1f);
+                float power = clamp(0.38f + (cd + pd) / 1300f, 0.35f, 1f);
 
+                float score = 1000f - cut * 5.2f - cd * 0.32f - pd * 0.22f;
                 Physics.Out o = Physics.run(balls, cue, table, ang, power, r);
-                if (o.firstHit != target.id || o.scratch) continue;
-                if (!o.potted.contains(target.id)) continue;
+                if (o.scratch) continue;
+                if (o.potted.contains(target.id)) {
+                    score += 250f;
+                } else if (o.firstHit != target.id) {
+                    continue;
+                }
 
-                float score = 1000f - cut * 5f - cd * 0.35f - pd * 0.2f;
                 if (top == null || score > top.score) {
                     top = new Shot();
                     top.angleDeg = ang;
                     top.power = power;
                     top.score = score;
+                    top.gx = gx; top.gy = gy;
+                    top.tx = target.x; top.ty = target.y;
+                    top.px = p[0]; top.py = p[1];
                     top.valid = true;
-                    top.why = "pot #" + target.id + " (" + Math.round(cut) + "°)";
+                    top.why = "POT #" + target.id + " (" + Math.round(cut) + "°)";
                 }
             }
         }
@@ -559,11 +612,14 @@ public final class Solver {
             if (d < nd) { nd = d; nearest = b; }
         }
         Shot s = new Shot();
-        if (nearest == null) { s.valid = false; s.why = "no target"; return s; }
+        if (nearest == null) { s.valid = false; s.why = "No target"; return s; }
         s.angleDeg = (float) Math.toDegrees(Math.atan2(nearest.y - cue.y, nearest.x - cue.x));
-        s.power = clamp(0.3f + nd / 900f, 0.35f, 0.9f);
+        s.power = clamp(0.45f + nd / 900f, 0.45f, 0.95f);
+        s.gx = nearest.x; s.gy = nearest.y;
+        s.tx = nearest.x; s.ty = nearest.y;
+        s.px = nearest.x; s.py = nearest.y;
         s.valid = true;
-        s.why = "safety hit #" + nearest.id;
+        s.why = "HIT #" + nearest.id;
         return s;
     }
 
@@ -577,7 +633,7 @@ public final class Solver {
             float u = ((b.x - x1) * dx + (b.y - y1) * dy) / (len * len);
             u = Math.max(0, Math.min(1, u));
             float px = x1 + dx * u, py = y1 + dy * u;
-            if (Math.hypot(b.x - px, b.y - py) < 2 * r * 0.96f) return false;
+            if (Math.hypot(b.x - px, b.y - py) < 2 * r * 0.94f) return false;
         }
         return true;
     }
@@ -606,7 +662,6 @@ import java.util.List;
 
 public final class RailwayBrain {
 
-    /** Null return karne pe caller local solver pe chala jata hai. */
     public static Solver.Shot solve(List<Ball> balls, Ball cue, Rect table, float r) {
         if (Config.BRAIN_URL == null || Config.BRAIN_URL.trim().isEmpty()) return null;
         HttpURLConnection con = null;
@@ -715,7 +770,7 @@ import java.util.concurrent.Executors;
 public class AutoPlayController {
     public interface Listener {
         void onState(String text);
-        void onPreview(float x, float y, float angleRad, float power, boolean show);
+        void onPreview(List<Ball> balls, Ball cue, Solver.Shot shot, boolean show);
     }
 
     private final Context ctx;
@@ -766,81 +821,114 @@ public class AutoPlayController {
         main.post(() -> ui.onState(s));
     }
 
-    private void preview(float x, float y, float angRad, float p, boolean show) {
-        main.post(() -> ui.onPreview(x, y, angRad, p, show));
+    private void preview(List<Ball> b, Ball c, Solver.Shot shot, boolean show) {
+        main.post(() -> ui.onPreview(b, c, shot, show));
     }
 
     private void tick() {
-        if (inFlight) { state("Ball chal rahi..."); return; }
+        if (inFlight) { return; }
         boolean forced = forceOnce;
         forceOnce = false;
-
-        if (!forced && !prefs().getBoolean(Config.K_AUTO, false)) {
-            state("AUTO OFF");
-            return;
-        }
-        if (!PoolAccessibilityService.ready()) { state("Accessibility OFF"); return; }
-        if (balls == null) { state("Frame nahi"); return; }
-        if (cue == null) { state("Cue ball nahi mili"); return; }
-        if (!still && !forced) { state("Balls moving..."); return; }
-
-        long now = SystemClock.uptimeMillis();
-        if (!forced && now - lastShot < Config.COOLDOWN_MS) { state("Cooldown"); return; }
-        if (!forced && now - lastFail < Config.FAIL_BACKOFF_MS) { state("Retry..."); return; }
 
         Rect table = new Rect(
                 prefs().getInt(Config.K_LEFT, 0),
                 prefs().getInt(Config.K_TOP, 0),
                 prefs().getInt(Config.K_RIGHT, 0),
                 prefs().getInt(Config.K_BOTTOM, 0));
-        if (table.width() < 200 || table.height() < 200) {
-            state("Pehle table calibrate karo");
+        if (table.width() < 200 || table.height() < 150) {
+            state("Table calibrate karo");
+            return;
+        }
+
+        if (balls == null) { state("Frame wait..."); return; }
+        if (cue == null) {
+            state("Balls: " + balls.size() + " | Cue wait...");
+            preview(balls, null, null, true);
             return;
         }
 
         float r = table.width() * Config.BALL_R_RATIO;
         List<Ball> snap = new ArrayList<>(balls);
         Ball cueSnap = cue.copy();
+
+        // Always compute best shot live so aim lines render continuously on screen!
+        Solver.Shot liveShot = Solver.best(snap, cueSnap, table, r);
+        preview(snap, cueSnap, liveShot, true);
+
+        boolean autoOn = prefs().getBoolean(Config.K_AUTO, false);
+        if (!forced && !autoOn) {
+            state(liveShot != null && liveShot.valid
+                    ? "READY: " + liveShot.why
+                    : "AUTO OFF | Balls: " + snap.size());
+            return;
+        }
+
+        if (!PoolAccessibilityService.ready()) {
+            state("Accessibility ON karo!");
+            return;
+        }
+        if (!still && !forced) {
+            state("Balls moving...");
+            return;
+        }
+
+        long now = SystemClock.uptimeMillis();
+        if (!forced && now - lastShot < Config.COOLDOWN_MS) {
+            state("Cooldown...");
+            return;
+        }
+        if (!forced && now - lastFail < Config.FAIL_BACKOFF_MS) {
+            return;
+        }
+
         inFlight = true;
-        state("Solving...");
+        state("Aiming...");
 
         bg.execute(() -> {
             Solver.Shot shot = RailwayBrain.solve(snap, cueSnap, table, r);
-            if (shot == null) shot = Solver.best(snap, cueSnap, table, r);
+            if (shot == null) shot = liveShot != null ? liveShot : Solver.best(snap, cueSnap, table, r);
             Solver.Shot result = shot;
-            main.post(() -> fire(result, cueSnap, table, r));
+            main.post(() -> fire(snap, cueSnap, result, table, r));
         });
     }
 
-    private void fire(Solver.Shot shot, Ball cueSnap, Rect table, float r) {
+    private void fire(List<Ball> snap, Ball cueSnap, Solver.Shot shot, Rect table, float r) {
         if (shot == null || !shot.valid || cueSnap == null) {
             inFlight = false;
             lastFail = SystemClock.uptimeMillis();
             state("Shot nahi mila");
             return;
         }
+
+        preview(snap, cueSnap, shot, true);
         float rad = (float) Math.toRadians(shot.angleDeg);
         float dirX = (float) Math.cos(rad), dirY = (float) Math.sin(rad);
-        boolean invert = prefs().getBoolean(Config.K_INVERT, false);
-        float sign = invert ? 1f : -1f;
-        float maxDrag = prefs().getInt(Config.K_MAXDRAG, (int) (table.width() * 0.28f));
-        float dist = r * 2.2f + shot.power * maxDrag;
 
-        float sx = cueSnap.x, sy = cueSnap.y;
-        float ex = clamp(sx + dirX * sign * dist, table.left + 4, table.right - 4);
-        float ey = clamp(sy + dirY * sign * dist, table.top + 4, table.bottom - 4);
+        // Step 1: Aim gesture on table (tap/drag near target point so 8 Ball Pool aims cue toward shot angle)
+        float aimDist = Math.min(table.width() * 0.22f, 240f);
+        float aimX = clamp(cueSnap.x + dirX * aimDist, table.left + 30, table.right - 30);
+        float aimY = clamp(cueSnap.y + dirY * aimDist, table.top + 30, table.bottom - 30);
 
-        preview(sx, sy, rad, shot.power, true);
-        lastShot = SystemClock.uptimeMillis();
-        state("SHOOT " + Math.round(shot.angleDeg) + "° p" + Math.round(shot.power * 100));
+        state("AIM " + Math.round(shot.angleDeg) + "° (" + shot.why + ")");
+        // Small drag at target point rotates cue stick in 8 Ball Pool
+        PoolAccessibilityService.swipe(aimX, aimY, aimX + dirX * 14f, aimY + dirY * 14f, Config.AIM_MS);
 
-        PoolAccessibilityService.swipe(sx, sy, ex, ey, Config.GESTURE_MS);
-
+        // Step 2: Pull power meter on the left side OR pull cue back
         main.postDelayed(() -> {
-            inFlight = false;
-            lastShot = SystemClock.uptimeMillis();
-            preview(0, 0, 0, 0, false);
-        }, Config.GESTURE_MS + 900);
+            state("SHOOT p" + Math.round(shot.power * 100) + "%");
+            // In 8 Ball Pool, the power meter is on the left side of the screen (x ~ table.left * 0.42f)
+            float meterX = Math.max(35f, table.left * 0.42f);
+            float meterTop = table.top + table.height() * 0.18f;
+            float meterDrag = table.height() * 0.55f * clamp(shot.power, 0.35f, 1.0f);
+            float meterBottom = Math.min(table.bottom - 10f, meterTop + meterDrag);
+
+            PoolAccessibilityService.swipe(meterX, meterTop, meterX, meterBottom, Config.POWER_MS);
+
+            main.postDelayed(() -> {
+                inFlight = false;
+                lastShot = SystemClock.uptimeMillis();
+            }, Config.POWER_MS + 900);
+        }, Config.AIM_MS + 220);
     }
 
     private float clamp(float v, float lo, float hi) {
@@ -888,7 +976,7 @@ public class ScreenCaptureService extends Service {
     private ImageReader reader;
     private HandlerThread thread;
     private Handler h;
-    private int sw, sh, dw, dh;
+    private int sw, sh, dw, dh, density;
     private long lastFrame;
     private List<Ball> prev = new ArrayList<>();
     private long stillSince;
@@ -918,14 +1006,6 @@ public class ScreenCaptureService extends Service {
         mp = mpm.getMediaProjection(code, data);
         if (mp == null) { stopSelf(); return START_NOT_STICKY; }
 
-        WindowManager wm = getSystemService(WindowManager.class);
-        DisplayMetrics dm = new DisplayMetrics();
-        wm.getDefaultDisplay().getRealMetrics(dm);
-        sw = dm.widthPixels;
-        sh = dm.heightPixels;
-        dw = Math.max(1, sw / Config.CAPTURE_DIV);
-        dh = Math.max(1, sh / Config.CAPTURE_DIV);
-
         thread = new HandlerThread("capture");
         thread.start();
         h = new Handler(thread.getLooper());
@@ -934,12 +1014,29 @@ public class ScreenCaptureService extends Service {
             @Override public void onStop() { stopSelf(); }
         }, h);
 
+        setupDisplay();
+        return START_NOT_STICKY;
+    }
+
+    private void setupDisplay() {
+        WindowManager wm = getSystemService(WindowManager.class);
+        DisplayMetrics dm = new DisplayMetrics();
+        wm.getDefaultDisplay().getRealMetrics(dm);
+        // Always enforce landscape dimensions if game is landscape
+        sw = Math.max(dm.widthPixels, dm.heightPixels);
+        sh = Math.min(dm.widthPixels, dm.heightPixels);
+        density = dm.densityDpi;
+        dw = Math.max(1, sw / Config.CAPTURE_DIV);
+        dh = Math.max(1, sh / Config.CAPTURE_DIV);
+
+        try { if (vd != null) vd.release(); } catch (Exception ignored) {}
+        try { if (reader != null) reader.close(); } catch (Exception ignored) {}
+
         reader = ImageReader.newInstance(dw, dh, PixelFormat.RGBA_8888, 2);
-        vd = mp.createVirtualDisplay("pool", dw, dh, dm.densityDpi,
+        vd = mp.createVirtualDisplay("pool", dw, dh, density,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 reader.getSurface(), null, h);
         reader.setOnImageAvailableListener(r -> onFrame(), h);
-        return START_NOT_STICKY;
     }
 
     private void onFrame() {
@@ -957,10 +1054,10 @@ public class ScreenCaptureService extends Service {
             if (bmp == null) return;
 
             SharedPreferences p = getSharedPreferences(Config.PREFS, MODE_PRIVATE);
-            int l = p.getInt(Config.K_LEFT, sw / 10);
-            int t = p.getInt(Config.K_TOP, sh / 4);
-            int r = p.getInt(Config.K_RIGHT, sw * 9 / 10);
-            int b = p.getInt(Config.K_BOTTOM, sh * 3 / 4);
+            int l = p.getInt(Config.K_LEFT, (int) (sw * 0.18f));
+            int t = p.getInt(Config.K_TOP, (int) (sh * 0.21f));
+            int r = p.getInt(Config.K_RIGHT, (int) (sw * 0.82f));
+            int b = p.getInt(Config.K_BOTTOM, (int) (sh * 0.92f));
 
             Rect table = new Rect(l / Config.CAPTURE_DIV, t / Config.CAPTURE_DIV,
                     r / Config.CAPTURE_DIV, b / Config.CAPTURE_DIV);
@@ -988,7 +1085,7 @@ public class ScreenCaptureService extends Service {
             for (Ball a : now) {
                 boolean matched = false;
                 for (Ball b : prev) {
-                    if (Math.hypot(a.x - b.x, a.y - b.y) < 8) { matched = true; break; }
+                    if (Math.hypot(a.x - b.x, a.y - b.y) < 10) { matched = true; break; }
                 }
                 if (!matched) { moved = true; break; }
             }
@@ -1058,8 +1155,10 @@ import android.content.SharedPreferences;
 import android.content.pm.ServiceInfo;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.DashPathEffect;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
@@ -1084,7 +1183,7 @@ public class PoolOverlayService extends Service
     private TextView status;
     private Button autoBtn, shootBtn, calBtn;
 
-    private boolean adjust, auto;
+    private boolean adjust = false, auto = false;
     private int tl, tt, tr, tb, sw, sh;
     private AutoPlayController ctl;
 
@@ -1142,16 +1241,32 @@ public class PoolOverlayService extends Service
         wm = getSystemService(WindowManager.class);
         android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
         wm.getDefaultDisplay().getRealMetrics(dm);
-        sw = dm.widthPixels;
-        sh = dm.heightPixels;
+        // Always use landscape bounds so table bottom is NEVER cut off when starting from portrait MainActivity!
+        sw = Math.max(dm.widthPixels, dm.heightPixels);
+        sh = Math.min(dm.widthPixels, dm.heightPixels);
 
         SharedPreferences p = getSharedPreferences(Config.PREFS, MODE_PRIVATE);
-        tl = p.getInt(Config.K_LEFT, sw / 10);
-        tt = p.getInt(Config.K_TOP, sh / 4);
-        tr = p.getInt(Config.K_RIGHT, sw * 9 / 10);
-        tb = p.getInt(Config.K_BOTTOM, sh * 3 / 4);
-        auto = p.getBoolean(Config.K_AUTO, false);
+        int defL = (int) (sw * 0.18f);
+        int defT = (int) (sh * 0.21f);
+        int defR = (int) (sw * 0.82f);
+        int defB = (int) (sh * 0.92f);
 
+        tl = p.getInt(Config.K_LEFT, defL);
+        tt = p.getInt(Config.K_TOP, defT);
+        tr = p.getInt(Config.K_RIGHT, defR);
+        tb = p.getInt(Config.K_BOTTOM, defB);
+
+        // Self-heal corrupted portrait bounds (where bottom > landscape height)
+        if (tb > sh || tr > sw || tr - tl < dp(180) || tb - tt < dp(120)) {
+            tl = defL; tt = defT; tr = defR; tb = defB;
+            p.edit().putInt(Config.K_LEFT, tl).putInt(Config.K_TOP, tt)
+                    .putInt(Config.K_RIGHT, tr).putInt(Config.K_BOTTOM, tb).apply();
+        } else if (!p.contains(Config.K_LEFT)) {
+            p.edit().putInt(Config.K_LEFT, tl).putInt(Config.K_TOP, tt)
+                    .putInt(Config.K_RIGHT, tr).putInt(Config.K_BOTTOM, tb).apply();
+        }
+
+        auto = p.getBoolean(Config.K_AUTO, false);
         ctl = new AutoPlayController(this, this);
 
         overlay = new Overlay(this);
@@ -1177,80 +1292,97 @@ public class PoolOverlayService extends Service
     private void buildPanel() {
         panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(dp(12), dp(10), dp(12), dp(10));
-        panel.setBackground(bg(Color.argb(242, 16, 18, 22), 16));
+        panel.setPadding(dp(10), dp(8), dp(10), dp(8));
+        panel.setBackground(bg(Color.argb(235, 16, 18, 24), 14));
 
         TextView title = new TextView(this);
-        title.setText("8 BALL LINES");
+        title.setText("8 BALL LINES (DRAG)");
         title.setTextColor(Color.WHITE);
-        title.setTextSize(13);
+        title.setTextSize(11);
         title.setTypeface(null, Typeface.BOLD);
         title.setGravity(Gravity.CENTER);
-        title.setPadding(0, dp(4), 0, dp(6));
+        title.setPadding(0, dp(2), 0, dp(4));
         panel.addView(title);
         makeDraggable(title);
 
         status = new TextView(this);
-        status.setTextColor(Color.argb(190, 255, 255, 255));
+        status.setText("Ready - Calibrate once");
+        status.setTextColor(Color.rgb(125, 249, 255));
         status.setTextSize(10);
         status.setGravity(Gravity.CENTER);
-        status.setPadding(0, dp(4), 0, dp(10));
+        status.setPadding(0, dp(2), 0, dp(6));
         panel.addView(status);
 
         autoBtn = new Button(this);
         autoBtn.setAllCaps(false);
-        autoBtn.setTextSize(12);
+        autoBtn.setTextSize(11);
         autoBtn.setTextColor(Color.WHITE);
         autoBtn.setOnClickListener(v -> {
+            // If user turns on AUTO while still in calibration mode, auto-save calibration so screen isn't blocked!
+            if (adjust) saveCal();
             auto = !auto;
             getSharedPreferences(Config.PREFS, MODE_PRIVATE).edit()
                     .putBoolean(Config.K_AUTO, auto).apply();
             paintAuto();
         });
-        panel.addView(autoBtn, new LinearLayout.LayoutParams(-1, dp(46)));
+        panel.addView(autoBtn, new LinearLayout.LayoutParams(-1, dp(38)));
 
         shootBtn = new Button(this);
         shootBtn.setText("SHOOT NOW");
-        shootBtn.setTextSize(11);
+        shootBtn.setTextSize(10);
         shootBtn.setAllCaps(false);
         shootBtn.setTextColor(Color.WHITE);
-        shootBtn.setBackground(bg(Color.rgb(190, 120, 20), 10));
-        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(-1, dp(40));
-        sp.topMargin = dp(8);
+        shootBtn.setBackground(bg(Color.rgb(217, 119, 6), 8));
+        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(-1, dp(34));
+        sp.topMargin = dp(6);
         panel.addView(shootBtn, sp);
-        shootBtn.setOnClickListener(v -> ctl.shootNow());
+        shootBtn.setOnClickListener(v -> {
+            if (adjust) saveCal();
+            ctl.shootNow();
+        });
 
         calBtn = new Button(this);
         calBtn.setText("CALIBRAR MESA");
         calBtn.setTextSize(10);
         calBtn.setAllCaps(false);
         calBtn.setTextColor(Color.WHITE);
-        calBtn.setBackground(bg(Color.rgb(35, 105, 170), 10));
-        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1, dp(38));
-        cp.topMargin = dp(8);
+        calBtn.setBackground(bg(Color.rgb(37, 99, 235), 8));
+        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1, dp(34));
+        cp.topMargin = dp(6);
         panel.addView(calBtn, cp);
         calBtn.setOnClickListener(v -> { if (adjust) saveCal(); else startCal(); });
 
+        Button resetBtn = new Button(this);
+        resetBtn.setText("RESET MESA");
+        resetBtn.setTextSize(9);
+        resetBtn.setAllCaps(false);
+        resetBtn.setTextColor(Color.rgb(200, 220, 255));
+        resetBtn.setBackground(bg(Color.rgb(45, 55, 72), 8));
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(-1, dp(30));
+        rp.topMargin = dp(6);
+        panel.addView(resetBtn, rp);
+        resetBtn.setOnClickListener(v -> resetCal());
+
         Button close = new Button(this);
         close.setText("FECHAR");
-        close.setTextSize(10);
+        close.setTextSize(9);
         close.setAllCaps(false);
-        close.setTextColor(Color.rgb(255, 130, 130));
-        close.setBackground(bg(Color.rgb(62, 30, 30), 10));
-        LinearLayout.LayoutParams cl = new LinearLayout.LayoutParams(-1, dp(34));
-        cl.topMargin = dp(8);
+        close.setTextColor(Color.rgb(255, 140, 140));
+        close.setBackground(bg(Color.rgb(69, 26, 26), 8));
+        LinearLayout.LayoutParams cl = new LinearLayout.LayoutParams(-1, dp(30));
+        cl.topMargin = dp(6);
         panel.addView(close, cl);
         close.setOnClickListener(v -> {
             stopService(new Intent(this, ScreenCaptureService.class));
             stopSelf();
         });
 
-        panelParams = new WindowManager.LayoutParams(dp(184), -2,
+        panelParams = new WindowManager.LayoutParams(dp(156), -2,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
         panelParams.gravity = Gravity.TOP | Gravity.LEFT;
-        panelParams.x = dp(8);
-        panelParams.y = dp(110);
+        panelParams.x = dp(6);
+        panelParams.y = dp(40);
         try { wm.addView(panel, panelParams); } catch (Exception ignored) {}
         paintAuto();
     }
@@ -1278,7 +1410,19 @@ public class PoolOverlayService extends Service
 
     private void paintAuto() {
         autoBtn.setText(auto ? "AUTO: ON" : "AUTO: OFF");
-        autoBtn.setBackground(bg(auto ? Color.rgb(22, 163, 74) : Color.rgb(95, 95, 95), 10));
+        autoBtn.setBackground(bg(auto ? Color.rgb(22, 163, 74) : Color.rgb(82, 82, 91), 8));
+    }
+
+    private void resetCal() {
+        android.util.DisplayMetrics dm = new android.util.DisplayMetrics();
+        wm.getDefaultDisplay().getRealMetrics(dm);
+        sw = Math.max(dm.widthPixels, dm.heightPixels);
+        sh = Math.min(dm.widthPixels, dm.heightPixels);
+        tl = (int) (sw * 0.18f);
+        tt = (int) (sh * 0.21f);
+        tr = (int) (sw * 0.82f);
+        tb = (int) (sh * 0.92f);
+        saveCal();
     }
 
     private void startCal() {
@@ -1287,11 +1431,13 @@ public class PoolOverlayService extends Service
         getSharedPreferences(Config.PREFS, MODE_PRIVATE).edit()
                 .putBoolean(Config.K_AUTO, false).apply();
         paintAuto();
+        // Make overlay touchable ONLY while calibrating 6 pockets
         overlayParams.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
         try { wm.updateViewLayout(overlay, overlayParams); } catch (Exception ignored) {}
         calBtn.setText("GUARDAR MESA");
-        calBtn.setBackground(bg(Color.rgb(25, 145, 75), 10));
+        calBtn.setBackground(bg(Color.rgb(22, 163, 74), 8));
+        status.setText("6 Pockets set karke GUARDAR dabao");
         overlay.invalidate();
     }
 
@@ -1301,6 +1447,7 @@ public class PoolOverlayService extends Service
         int minT = Math.min(tt, tb), maxB = Math.max(tt, tb);
         tl = minL; tr = maxR; tt = minT; tb = maxB;
 
+        // Restore FLAG_NOT_TOUCHABLE so all game touches work normally!
         overlayParams.flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                 | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN;
@@ -1311,17 +1458,18 @@ public class PoolOverlayService extends Service
                 .putInt(Config.K_RIGHT, tr).putInt(Config.K_BOTTOM, tb)
                 .putInt(Config.K_W, sw).putInt(Config.K_H, sh).apply();
         calBtn.setText("CALIBRAR MESA");
-        calBtn.setBackground(bg(Color.rgb(35, 105, 170), 10));
+        calBtn.setBackground(bg(Color.rgb(37, 99, 235), 8));
+        status.setText("Table Saved! Game touch active");
         overlay.invalidate();
     }
 
     @Override public void onState(String text) {
-        if (status != null) status.setText(text);
+        if (status != null && !adjust) status.setText(text);
     }
 
-    @Override public void onPreview(float x, float y, float angleRad, float power, boolean show) {
+    @Override public void onPreview(List<Ball> balls, Ball cue, Solver.Shot shot, boolean show) {
         if (overlay == null) return;
-        overlay.setPreview(x, y, angleRad, power, show);
+        overlay.setPreview(balls, cue, shot, show);
     }
 
     @Override public void onDestroy() {
@@ -1336,103 +1484,143 @@ public class PoolOverlayService extends Service
 
     private class Overlay extends View {
         private final Paint line = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint potLine = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint dot = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private int corner;
+        private final Paint boxPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private int handle = 0;
         private float downX, downY;
         private int sL, sT, sR, sB;
         private boolean previewOn;
-        private float pvX, pvY, pvAngle, pvPower;
+        private List<Ball> pvBalls = new ArrayList<>();
+        private Ball pvCue;
+        private Solver.Shot pvShot;
 
         Overlay(Context c) {
             super(c);
             setLayerType(View.LAYER_TYPE_SOFTWARE, null);
             line.setStrokeWidth(dp(2.5f));
             line.setStyle(Paint.Style.STROKE);
-            line.setColor(Color.WHITE);
+            line.setColor(Color.CYAN);
+            line.setPathEffect(new DashPathEffect(new float[]{dp(8), dp(4)}, 0));
+
+            potLine.setStrokeWidth(dp(3f));
+            potLine.setStyle(Paint.Style.STROKE);
+            potLine.setColor(Color.rgb(74, 222, 128));
+
             dot.setStyle(Paint.Style.STROKE);
-            dot.setStrokeWidth(dp(2.5f));
+            dot.setStrokeWidth(dp(2f));
             dot.setColor(Color.WHITE);
         }
 
-        void setPreview(float x, float y, float a, float p, boolean show) {
-            pvX = x; pvY = y; pvAngle = a; pvPower = p;
+        void setPreview(List<Ball> balls, Ball cue, Solver.Shot shot, boolean show) {
+            pvBalls = balls != null ? balls : new ArrayList<>();
+            pvCue = cue;
+            pvShot = shot;
             previewOn = show;
             invalidate();
         }
 
         @Override public boolean onTouchEvent(MotionEvent e) {
             if (!adjust) return false;
-            float x = e.getX(), y = e.getY(), h = dp(48);
+            float x = e.getX(), y = e.getY(), h = dp(44);
+            int mx = (tl + tr) / 2;
             switch (e.getAction()) {
                 case MotionEvent.ACTION_DOWN:
                     downX = x; downY = y;
                     sL = tl; sT = tt; sR = tr; sB = tb;
-                    if (Math.hypot(x - tl, y - tt) < h) corner = 1;
-                    else if (Math.hypot(x - tr, y - tt) < h) corner = 2;
-                    else if (Math.hypot(x - tl, y - tb) < h) corner = 3;
-                    else if (Math.hypot(x - tr, y - tb) < h) corner = 4;
-                    else corner = 0;
+                    // 6 Pocket Handles:
+                    // 1: Top-Left, 2: Top-Center, 3: Top-Right
+                    // 4: Bottom-Left, 5: Bottom-Center, 6: Bottom-Right
+                    if (Math.hypot(x - tl, y - tt) < h) handle = 1;
+                    else if (Math.hypot(x - mx, y - tt) < h) handle = 2;
+                    else if (Math.hypot(x - tr, y - tt) < h) handle = 3;
+                    else if (Math.hypot(x - tl, y - tb) < h) handle = 4;
+                    else if (Math.hypot(x - mx, y - tb) < h) handle = 5;
+                    else if (Math.hypot(x - tr, y - tb) < h) handle = 6;
+                    else if (x > tl && x < tr && y > tt && y < tb) handle = 7; // Drag whole table
+                    else handle = 0;
                     return true;
                 case MotionEvent.ACTION_MOVE:
                     float dx = x - downX, dy = y - downY;
-                    if (corner == 1) { tl = (int) (sL + dx); tt = (int) (sT + dy); }
-                    if (corner == 2) { tr = (int) (sR + dx); tt = (int) (sT + dy); }
-                    if (corner == 3) { tl = (int) (sL + dx); tb = (int) (sB + dy); }
-                    if (corner == 4) { tr = (int) (sR + dx); tb = (int) (sB + dy); }
+                    if (handle == 1) { tl = (int) (sL + dx); tt = (int) (sT + dy); }
+                    else if (handle == 2) { tt = (int) (sT + dy); }
+                    else if (handle == 3) { tr = (int) (sR + dx); tt = (int) (sT + dy); }
+                    else if (handle == 4) { tl = (int) (sL + dx); tb = (int) (sB + dy); }
+                    else if (handle == 5) { tb = (int) (sB + dy); }
+                    else if (handle == 6) { tr = (int) (sR + dx); tb = (int) (sB + dy); }
+                    else if (handle == 7) {
+                        tl = (int) (sL + dx); tr = (int) (sR + dx);
+                        tt = (int) (sT + dy); tb = (int) (sB + dy);
+                    }
                     invalidate();
                     return true;
                 case MotionEvent.ACTION_UP:
-                    corner = 0;
+                    handle = 0;
                     return true;
             }
             return false;
         }
 
-        private float[] exit(float x, float y, float dx, float dy) {
-            float t = Float.MAX_VALUE;
-            int wall = -1;
-            if (dx > 0) { float c = (tr - x) / dx; if (c > 0 && c < t) { t = c; wall = 0; } }
-            if (dx < 0) { float c = (tl - x) / dx; if (c > 0 && c < t) { t = c; wall = 1; } }
-            if (dy > 0) { float c = (tb - y) / dy; if (c > 0 && c < t) { t = c; wall = 2; } }
-            if (dy < 0) { float c = (tt - y) / dy; if (c > 0 && c < t) { t = c; wall = 3; } }
-            return new float[]{t, wall};
-        }
-
-        private void drawPath(Canvas c, float x, float y, float ang, float power) {
-            float dx = (float) Math.cos(ang), dy = (float) Math.sin(ang);
-            for (int i = 0; i < 4; i++) {
-                float[] e = exit(x, y, dx, dy);
-                if (e[0] == Float.MAX_VALUE) break;
-                float nx = x + dx * e[0], ny = y + dy * e[0];
-                line.setColor(i == 0 ? 0xFFFFFFFF : 0x88FFFFFF);
-                line.setStrokeWidth(dp(i == 0 ? 2.5f : 1.6f));
-                c.drawLine(x, y, nx, ny, line);
-                x = nx; y = ny;
-                if (e[1] <= 1) dx = -dx; else dy = -dy;
-            }
-            float len = dp(14) + power * dp(60);
-            c.drawCircle(pvX, pvY, dp(9), dot);
-            c.drawCircle(pvX + (float) Math.cos(ang) * len,
-                    pvY + (float) Math.sin(ang) * len, dp(6), dot);
-        }
-
         @Override protected void onDraw(Canvas c) {
             super.onDraw(c);
+            int mx = (tl + tr) / 2;
+
+            // Always draw subtle table frame & 6 pocket rings
+            boxPaint.setStyle(Paint.Style.STROKE);
+            boxPaint.setStrokeWidth(dp(adjust ? 2.5f : 1.2f));
+            boxPaint.setColor(adjust ? Color.YELLOW : 0x55FACC15);
+            c.drawRect(tl, tt, tr, tb, boxPaint);
+
+            int[][] sixPockets = new int[][]{
+                {tl, tt}, {mx, tt}, {tr, tt},
+                {tl, tb}, {mx, tb}, {tr, tb}
+            };
+
             if (adjust) {
-                Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-                p.setColor(0x3328A8FF);
-                c.drawRect(tl, tt, tr, tb, p);
-                p.setStyle(Paint.Style.STROKE);
-                p.setStrokeWidth(dp(2));
-                p.setColor(Color.YELLOW);
-                c.drawRect(tl, tt, tr, tb, p);
-                p.setStyle(Paint.Style.FILL);
-                for (int[] pt : new int[][]{{tl, tt}, {tr, tt}, {tl, tb}, {tr, tb}}) {
-                    c.drawCircle(pt[0], pt[1], dp(11), p);
+                boxPaint.setStyle(Paint.Style.FILL);
+                boxPaint.setColor(0x2838BDF8);
+                c.drawRect(tl, tt, tr, tb, boxPaint);
+
+                for (int[] pt : sixPockets) {
+                    boxPaint.setStyle(Paint.Style.FILL);
+                    boxPaint.setColor(Color.YELLOW);
+                    c.drawCircle(pt[0], pt[1], dp(12), boxPaint);
+                    boxPaint.setStyle(Paint.Style.STROKE);
+                    boxPaint.setStrokeWidth(dp(2));
+                    boxPaint.setColor(Color.BLACK);
+                    c.drawCircle(pt[0], pt[1], dp(12), boxPaint);
                 }
                 return;
             }
-            if (previewOn) drawPath(c, pvX, pvY, pvAngle, pvPower);
+
+            // Draw 6 pocket target markers
+            boxPaint.setStyle(Paint.Style.STROKE);
+            boxPaint.setStrokeWidth(dp(1.5f));
+            boxPaint.setColor(0x884ADE80);
+            for (int[] pt : sixPockets) {
+                c.drawCircle(pt[0], pt[1], dp(10), boxPaint);
+            }
+
+            if (!previewOn) return;
+
+            float r = Math.max(dp(9), (tr - tl) * Config.BALL_R_RATIO);
+
+            // Highlight detected balls
+            for (Ball b : pvBalls) {
+                dot.setColor(b.id == 0 ? Color.WHITE : 0x9938BDF8);
+                dot.setStrokeWidth(dp(b.id == 0 ? 2.5f : 1.5f));
+                c.drawCircle(b.x, b.y, r, dot);
+            }
+
+            // Draw live aim lines (Cue -> Ghost Ball & Target Ball -> Pocket)
+            if (pvCue != null && pvShot != null && pvShot.valid) {
+                c.drawLine(pvCue.x, pvCue.y, pvShot.gx, pvShot.gy, line);
+                c.drawLine(pvShot.tx, pvShot.ty, pvShot.px, pvShot.py, potLine);
+
+                dot.setColor(Color.YELLOW);
+                dot.setStrokeWidth(dp(2f));
+                c.drawCircle(pvShot.gx, pvShot.gy, r, dot);
+            }
         }
     }
 }
@@ -1468,7 +1656,7 @@ public class MainActivity extends Activity {
         root.setGravity(Gravity.CENTER_HORIZONTAL);
 
         TextView title = new TextView(this);
-        title.setText("POOL LINES\nAuto-play");
+        title.setText("POOL LINES v4.0\n6-Pocket Auto-Play");
         title.setTextColor(Color.WHITE);
         title.setTextSize(22);
         title.setGravity(Gravity.CENTER);
@@ -1478,7 +1666,7 @@ public class MainActivity extends Activity {
         log.setTextColor(Color.rgb(175, 175, 175));
         log.setTextSize(12);
         log.setPadding(0, 40, 0, 30);
-        log.setText("1. Overlay\n2. Accessibility\n3. Screen capture");
+        log.setText("1. Overlay Permission\n2. Accessibility ON\n3. Screen Capture Allow");
         root.addView(log);
 
         Button start = new Button(this);
@@ -1594,7 +1782,7 @@ def clear(balls, tid, x1, y1, x2, y2, r):
         if bid in (0, tid):
             continue
         u = max(0.0, min(1.0, ((bx - x1) * dx + (by - y1) * dy) / (ln * ln)))
-        if math.hypot(bx - (x1 + dx * u), by - (y1 + dy * u)) < 2 * r * 0.96:
+        if math.hypot(bx - (x1 + dx * u), by - (y1 + dy * u)) < 2 * r * 0.94:
             return False
     return True
 
@@ -1604,12 +1792,12 @@ def solve(q: Req):
     r = q.r
     cx, cy = q.cue
     pockets = [
-        (l + r * 1.4, t + r * 1.4),
-        ((l + rr) / 2, t + r * 0.6),
-        (rr - r * 1.4, t + r * 1.4),
-        (l + r * 1.4, bb - r * 1.4),
-        ((l + rr) / 2, bb - r * 0.6),
-        (rr - r * 1.4, bb - r * 1.4),
+        (l + r * 1.15, t + r * 1.15),
+        ((l + rr) / 2, t + r * 0.45),
+        (rr - r * 1.15, t + r * 1.15),
+        (l + r * 1.15, bb - r * 1.15),
+        ((l + rr) / 2, bb - r * 0.45),
+        (rr - r * 1.15, bb - r * 1.15),
     ]
     best = None
     for bid, col, bx, by in q.balls:
@@ -1627,20 +1815,20 @@ def solve(q: Req):
                 continue
             cdx, cdy = gx - cx, gy - cy
             cd = math.hypot(cdx, cdy)
-            if cd < r * 1.2:
+            if cd < r * 1.1:
                 continue
             dot = max(-1.0, min(1.0, (cdx * pdx + cdy * pdy) / cd))
             cut = math.degrees(math.acos(dot))
-            if cut > 75:
+            if cut > 76:
                 continue
             if not clear(q.balls, bid, cx, cy, gx, gy, r):
                 continue
             if not clear(q.balls, bid, bx, by, px, py, r):
                 continue
-            score = 1000 - cut * 5 - cd * 0.35 - pd * 0.2
+            score = 1000 - cut * 5.2 - cd * 0.32 - pd * 0.22
             if best is None or score > best[0]:
                 best = (score, math.degrees(math.atan2(cdy, cdx)),
-                        min(1.0, max(0.3, 0.32 + (cd + pd) / 1400)))
+                        min(1.0, max(0.35, 0.38 + (cd + pd) / 1300)))
     if best is not None:
         return {"valid": True, "angle": best[1], "power": best[2], "why": "pot"}
     cand = [(math.hypot(bx - cx, by - cy), bx, by)
@@ -1651,7 +1839,7 @@ def solve(q: Req):
     return {
         "valid": True,
         "angle": math.degrees(math.atan2(by - cy, bx - cx)),
-        "power": min(0.9, max(0.35, 0.3 + d / 900)),
+        "power": min(0.95, max(0.45, 0.45 + d / 900)),
         "why": "fallback",
     }
 EOF
@@ -1689,31 +1877,10 @@ cat > railway.json <<'EOF'
 EOF
 
 cat > README.md <<'EOF'
-# Pool Lines — 8 Ball Pool Auto Aim (Non-Root)
+# Pool Lines v4.0 — 6-Pocket 8 Ball Pool Auto Aim (Non-Root)
 
-Screen capture + on-device CV + physics solver + accessibility gesture injection.
-Koi root nahi chahiye.
-
-## Build (GitHub Actions)
-GitHub pe push karo -> Actions -> **Build APK** -> `pool-lines-apk` artifact download karo.
-
-## Setup (Order Important)
-1. Install APK, app kholo, **START** dabao.
-2. Overlay permission allow karo.
-3. Settings -> Accessibility -> **Pool Lines** ON karo.
-4. START dobara dabao -> Screen Capture allow karo.
-5. 8 Ball Pool practice table kholo.
-6. Panel se **CALIBRAR MESA** -> 4 yellow corners felt ke andar wale corners pe drag karo -> **GUARDAR MESA**.
-7. **SHOOT NOW** se ek shot test karo.
-8. Angle ulti taraf ja raha ho to `Config.K_INVERT` true karke rebuild karo.
-9. Sahi lage to **AUTO: ON**.
+Screen capture + adaptive felt CV + 6-pocket calibration + 2-step aim & left power-meter shooter.
 EOF
-
-echo "==> Gradle Wrapper check"
-if command -v gradle >/dev/null 2>&1; then
-  gradle wrapper --gradle-version 8.4
-  chmod +x gradlew
-fi
 
 echo "==> Git Commit Setup"
 if [ ! -d .git ]; then
@@ -1721,5 +1888,5 @@ if [ ! -d .git ]; then
   git branch -M main
 fi
 git add -A
-git commit -m "fix: full auto-play android overlay + physics solver + railway server" || true
+git commit -m "fix(v4.0): 6-pocket landscape calibration, touch unlock, adaptive cue detector, 2-step power meter shooter" || true
 echo "DONE. Repo ready to push to GitHub!"

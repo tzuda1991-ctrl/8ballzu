@@ -27,7 +27,7 @@ public class MainActivity extends Activity {
         root.setGravity(Gravity.CENTER_HORIZONTAL);
 
         TextView title = new TextView(this);
-        title.setText("POOL LINES\nAuto-play");
+        title.setText("POOL LINES v4.0\n6-Pocket Auto-Play");
         title.setTextColor(Color.WHITE);
         title.setTextSize(22);
         title.setGravity(Gravity.CENTER);
@@ -37,7 +37,7 @@ public class MainActivity extends Activity {
         log.setTextColor(Color.rgb(175, 175, 175));
         log.setTextSize(12);
         log.setPadding(0, 40, 0, 30);
-        log.setText("1. Overlay\n2. Accessibility\n3. Screen capture");
+        log.setText("1. Overlay Permission\n2. Accessibility ON\n3. Screen Capture Allow");
         root.addView(log);
 
         Button start = new Button(this);

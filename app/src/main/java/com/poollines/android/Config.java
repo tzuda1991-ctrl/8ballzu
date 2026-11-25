@@ -11,11 +11,12 @@ public final class Config {
 
     public static final int CAPTURE_DIV = 2;
     public static final int TARGET_FPS = 8;
-    public static final float BALL_R_RATIO = 0.0208f;
-    public static final int STILL_MS = 900;
-    public static final long COOLDOWN_MS = 3500;
-    public static final long GESTURE_MS = 700;
-    public static final long FAIL_BACKOFF_MS = 1500;
+    public static final float BALL_R_RATIO = 0.0195f;
+    public static final int STILL_MS = 750;
+    public static final long COOLDOWN_MS = 3200;
+    public static final long AIM_MS = 380;
+    public static final long POWER_MS = 520;
+    public static final long FAIL_BACKOFF_MS = 1200;
     public static final int BRAIN_TIMEOUT_MS = 1200;
 
     private Config() {}

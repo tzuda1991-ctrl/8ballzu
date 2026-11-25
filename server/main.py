@@ -23,7 +23,7 @@ def clear(balls, tid, x1, y1, x2, y2, r):
         if bid in (0, tid):
             continue
         u = max(0.0, min(1.0, ((bx - x1) * dx + (by - y1) * dy) / (ln * ln)))
-        if math.hypot(bx - (x1 + dx * u), by - (y1 + dy * u)) < 2 * r * 0.96:
+        if math.hypot(bx - (x1 + dx * u), by - (y1 + dy * u)) < 2 * r * 0.94:
             return False
     return True
 
@@ -33,12 +33,12 @@ def solve(q: Req):
     r = q.r
     cx, cy = q.cue
     pockets = [
-        (l + r * 1.4, t + r * 1.4),
-        ((l + rr) / 2, t + r * 0.6),
-        (rr - r * 1.4, t + r * 1.4),
-        (l + r * 1.4, bb - r * 1.4),
-        ((l + rr) / 2, bb - r * 0.6),
-        (rr - r * 1.4, bb - r * 1.4),
+        (l + r * 1.15, t + r * 1.15),
+        ((l + rr) / 2, t + r * 0.45),
+        (rr - r * 1.15, t + r * 1.15),
+        (l + r * 1.15, bb - r * 1.15),
+        ((l + rr) / 2, bb - r * 0.45),
+        (rr - r * 1.15, bb - r * 1.15),
     ]
     best = None
     for bid, col, bx, by in q.balls:
@@ -56,20 +56,20 @@ def solve(q: Req):
                 continue
             cdx, cdy = gx - cx, gy - cy
             cd = math.hypot(cdx, cdy)
-            if cd < r * 1.2:
+            if cd < r * 1.1:
                 continue
             dot = max(-1.0, min(1.0, (cdx * pdx + cdy * pdy) / cd))
             cut = math.degrees(math.acos(dot))
-            if cut > 75:
+            if cut > 76:
                 continue
             if not clear(q.balls, bid, cx, cy, gx, gy, r):
                 continue
             if not clear(q.balls, bid, bx, by, px, py, r):
                 continue
-            score = 1000 - cut * 5 - cd * 0.35 - pd * 0.2
+            score = 1000 - cut * 5.2 - cd * 0.32 - pd * 0.22
             if best is None or score > best[0]:
                 best = (score, math.degrees(math.atan2(cdy, cdx)),
-                        min(1.0, max(0.3, 0.32 + (cd + pd) / 1400)))
+                        min(1.0, max(0.35, 0.38 + (cd + pd) / 1300)))
     if best is not None:
         return {"valid": True, "angle": best[1], "power": best[2], "why": "pot"}
     cand = [(math.hypot(bx - cx, by - cy), bx, by)
@@ -80,6 +80,6 @@ def solve(q: Req):
     return {
         "valid": True,
         "angle": math.degrees(math.atan2(by - cy, bx - cx)),
-        "power": min(0.9, max(0.35, 0.3 + d / 900)),
+        "power": min(0.95, max(0.45, 0.45 + d / 900)),
         "why": "fallback",
     }

@@ -49,7 +49,7 @@ public final class Physics {
 
             if (cueLive) {
                 for (float[] p : pockets) {
-                    if (near(c, p, r * 1.35f)) {
+                    if (near(c, p, r * 1.45f)) {
                         cueLive = false;
                         o.scratch = true;
                         break;
@@ -60,7 +60,7 @@ public final class Physics {
                 Ball b = sim.get(i);
                 boolean dropped = false;
                 for (float[] p : pockets) {
-                    if (near(b, p, r * 1.35f)) { dropped = true; break; }
+                    if (near(b, p, r * 1.45f)) { dropped = true; break; }
                 }
                 if (dropped) {
                     o.potted.add(b.id);
@@ -101,7 +101,6 @@ public final class Physics {
         if (d < 0.001f) d = 0.001f;
         float nx = dx / d, ny = dy / d;
 
-        // Positional separation to prevent multi-frame overlap lock
         float pen = (2f * r) - d;
         if (pen > 0) {
             a.x -= nx * pen * 0.5f;

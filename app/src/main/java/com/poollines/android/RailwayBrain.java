@@ -13,7 +13,6 @@ import java.util.List;
 
 public final class RailwayBrain {
 
-    /** Null return karne pe caller local solver pe chala jata hai. */
     public static Solver.Shot solve(List<Ball> balls, Ball cue, Rect table, float r) {
         if (Config.BRAIN_URL == null || Config.BRAIN_URL.trim().isEmpty()) return null;
         HttpURLConnection con = null;

@@ -36,7 +36,7 @@ public class ScreenCaptureService extends Service {
     private ImageReader reader;
     private HandlerThread thread;
     private Handler h;
-    private int sw, sh, dw, dh;
+    private int sw, sh, dw, dh, density;
     private long lastFrame;
     private List<Ball> prev = new ArrayList<>();
     private long stillSince;
@@ -66,14 +66,6 @@ public class ScreenCaptureService extends Service {
         mp = mpm.getMediaProjection(code, data);
         if (mp == null) { stopSelf(); return START_NOT_STICKY; }
 
-        WindowManager wm = getSystemService(WindowManager.class);
-        DisplayMetrics dm = new DisplayMetrics();
-        wm.getDefaultDisplay().getRealMetrics(dm);
-        sw = dm.widthPixels;
-        sh = dm.heightPixels;
-        dw = Math.max(1, sw / Config.CAPTURE_DIV);
-        dh = Math.max(1, sh / Config.CAPTURE_DIV);
-
         thread = new HandlerThread("capture");
         thread.start();
         h = new Handler(thread.getLooper());
@@ -82,12 +74,29 @@ public class ScreenCaptureService extends Service {
             @Override public void onStop() { stopSelf(); }
         }, h);
 
+        setupDisplay();
+        return START_NOT_STICKY;
+    }
+
+    private void setupDisplay() {
+        WindowManager wm = getSystemService(WindowManager.class);
+        DisplayMetrics dm = new DisplayMetrics();
+        wm.getDefaultDisplay().getRealMetrics(dm);
+        // Always enforce landscape dimensions if game is landscape
+        sw = Math.max(dm.widthPixels, dm.heightPixels);
+        sh = Math.min(dm.widthPixels, dm.heightPixels);
+        density = dm.densityDpi;
+        dw = Math.max(1, sw / Config.CAPTURE_DIV);
+        dh = Math.max(1, sh / Config.CAPTURE_DIV);
+
+        try { if (vd != null) vd.release(); } catch (Exception ignored) {}
+        try { if (reader != null) reader.close(); } catch (Exception ignored) {}
+
         reader = ImageReader.newInstance(dw, dh, PixelFormat.RGBA_8888, 2);
-        vd = mp.createVirtualDisplay("pool", dw, dh, dm.densityDpi,
+        vd = mp.createVirtualDisplay("pool", dw, dh, density,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 reader.getSurface(), null, h);
         reader.setOnImageAvailableListener(r -> onFrame(), h);
-        return START_NOT_STICKY;
     }
 
     private void onFrame() {
@@ -105,10 +114,10 @@ public class ScreenCaptureService extends Service {
             if (bmp == null) return;
 
             SharedPreferences p = getSharedPreferences(Config.PREFS, MODE_PRIVATE);
-            int l = p.getInt(Config.K_LEFT, sw / 10);
-            int t = p.getInt(Config.K_TOP, sh / 4);
-            int r = p.getInt(Config.K_RIGHT, sw * 9 / 10);
-            int b = p.getInt(Config.K_BOTTOM, sh * 3 / 4);
+            int l = p.getInt(Config.K_LEFT, (int) (sw * 0.18f));
+            int t = p.getInt(Config.K_TOP, (int) (sh * 0.21f));
+            int r = p.getInt(Config.K_RIGHT, (int) (sw * 0.82f));
+            int b = p.getInt(Config.K_BOTTOM, (int) (sh * 0.92f));
 
             Rect table = new Rect(l / Config.CAPTURE_DIV, t / Config.CAPTURE_DIV,
                     r / Config.CAPTURE_DIV, b / Config.CAPTURE_DIV);
@@ -136,7 +145,7 @@ public class ScreenCaptureService extends Service {
             for (Ball a : now) {
                 boolean matched = false;
                 for (Ball b : prev) {
-                    if (Math.hypot(a.x - b.x, a.y - b.y) < 8) { matched = true; break; }
+                    if (Math.hypot(a.x - b.x, a.y - b.y) < 10) { matched = true; break; }
                 }
                 if (!matched) { moved = true; break; }
             }
